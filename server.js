@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const cron = require('node-cron');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -9,32 +10,50 @@ app.use(cors());
 // আপনার মূল গুগল অ্যাপস স্ক্রিপ্ট ওয়েব অ্যাপের লিংক
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz9V9Fsqhxxqjd3mIPGWQBwwmHpNSOO01TuO_R3iUPbYbflJjYa9vj91T8PeXlhengtIg/exec";
 
-// মেমোরি ক্যাশ স্টোরেজ (সার্ভার আগে থেকেই ডাটা এনে রাখবে)
+// মেমোরি ক্যাশ স্টোরেজ
 let cachedPosts = [];
 let cachedUsers = [];
 
-// প্রতি ৩ সেকেন্ড পর পর ব্যাকগ্রাউন্ডে গুগল শিট থেকে ডাটা টেনে ক্যাশ করে রাখবে
-async function syncDataFromGoogleSheet() {
+// সাধারণ ব্যাকগ্রাউন্ড সিঙ্ক (প্রতি ৫ সেকেন্ড পরপর নতুন ডেটা থাকলে ক্যাশ আপডেট করবে)
+async function backgroundSync() {
     try {
-        let postRes = await fetch(`${APPS_SCRIPT_URL}?type=posts`);
+        let postRes = await fetch(`${APPS_SCRIPT_URL}?type=posts&t=${Date.now()}`);
         let postData = await postRes.json();
-        if (Array.isArray(postData)) cachedPosts = postData;
+        if (Array.isArray(postData) && postData.length > 0) {
+            cachedPosts = postData; 
+        }
 
-        let userRes = await fetch(`${APPS_SCRIPT_URL}?type=users`);
+        let userRes = await fetch(`${APPS_SCRIPT_URL}?type=users&t=${Date.now()}`);
         let userData = await userRes.json();
-        if (Array.isArray(userData)) cachedUsers = userData;
-
-        console.log("Background Cache Synced at:", new Date().toLocaleTimeString());
+        if (Array.isArray(userData) && userData.length > 0) {
+            cachedUsers = userData;
+        }
     } catch (err) {
-        console.error("Sync Error:", err.message);
+        console.error("Background Sync Error:", err.message);
     }
 }
 
-// সার্ভার চালু হওয়ার সাথে একবার ফেচ হবে এবং প্রতি ৩ সেকেন্ড পর পর চলতে থাকবে
-syncDataFromGoogleSheet();
-setInterval(syncDataFromGoogleSheet, 3000);
+// সার্ভার চালু হওয়ার সাথে একবার ফেচ হবে এবং প্রতি ৫ সেকেন্ড পর পর চলতে থাকবে
+backgroundSync();
+setInterval(backgroundSync, 5000);
 
-// --- GET রিকোয়েস্ট (ক্যাশ থেকে ইনস্ট্যান্ট ডাটা পাঠাবে) ---
+// --- প্রতিদিন রাত ৩:০০ টায় ক্যাশ রিসেট ও নতুন ডাটা নেওয়ার শিডিউল (Cron Job) ---
+// ক্রন ফরম্যাট: '0 3 * * *' মানে প্রতিদিন রাত ৩টা ০ মিনিট ০ সেকেন্ডে রান হবে
+cron.schedule('0 3 * * *', async () => {
+    console.log("⏰ রাত ৩টা বেজে গেছে! পুরোনো ক্যাশ ক্লিয়ার করে নতুন ক্যাশ নেওয়া হচ্ছে...");
+    
+    // ক্যাশ সাময়িকভাবে খালি করা
+    cachedPosts = [];
+    cachedUsers = [];
+
+    // সাথে সাথেই গুগল শিট থেকে একদম তাজা ক্যাশ টেনে আনা
+    await backgroundSync();
+    console.log("✨ রাতের শিডিউল অনুযায়ী ক্যাশ সফলভাবে রিফ্রেশ করা হয়েছে!");
+}, {
+    timezone: "Asia/Dhaka" // বাংলাদেশের সময় অনুযায়ী রাত ৩টা
+});
+
+// --- GET রিকোয়েস্ট: ইনস্ট্যান্ট ক্যাশ ডাটা পাঠানো ---
 app.get('/', async (req, res) => {
     const type = req.query.type;
     
@@ -45,15 +64,18 @@ app.get('/', async (req, res) => {
         return res.json(cachedUsers);
     } 
     else {
-        // ফ্রেন্ডস বা মেসেজের মতো রিয়েলটাইম ডাটা সরাসরি শিট থেকে ফেচ হবে
-        let targetURL = `${APPS_SCRIPT_URL}?${new URLSearchParams(req.query).toString()}`;
-        let r = await fetch(targetURL);
-        let d = await r.json();
-        return res.json(d);
+        try {
+            let targetURL = `${APPS_SCRIPT_URL}?${new URLSearchParams(req.query).toString()}`;
+            let r = await fetch(targetURL);
+            let d = await r.json();
+            return res.json(d);
+        } catch (e) {
+            return res.json([]);
+        }
     }
 });
 
-// --- POST রিকোয়েস্ট (লগইন, রেজিস্ট্রেশন, পোস্ট, লাইক, মেসেজ ইত্যাদি গুগল শিটে পাঠাবে) ---
+// --- POST রিকোয়েস্ট ---
 app.post('/', async (req, res) => {
     try {
         let response = await fetch(APPS_SCRIPT_URL, {
@@ -63,10 +85,7 @@ app.post('/', async (req, res) => {
         });
         let result = await response.json();
 
-        // নতুন পোস্ট বা লাইক হলে সাথে সাথে ক্যাশ আপডেট করে নেবে
-        if (["addPost", "likePost", "addComment", "register", "updateProfilePic"].includes(req.body.action)) {
-            setTimeout(syncDataFromGoogleSheet, 300); 
-        }
+        setTimeout(backgroundSync, 1000);
 
         res.json(result);
     } catch (err) {
@@ -76,5 +95,5 @@ app.post('/', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`B_book Server is running on port ${PORT}`);
+    console.log(`B_book Cron Cache Server is running on port ${PORT}`);
 });
