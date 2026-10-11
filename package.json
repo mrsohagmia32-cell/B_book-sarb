@@ -1,7 +1,7 @@
 {
   "name": "b-book-backend",
   "version": "1.0.0",
-  "description": "High speed cache server for B_book",
+  "description": "High speed cache server with 3 AM scheduled refresh for B_book",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,7 +9,8 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "node-cron": "^3.0.3"
   },
   "engines": {
     "node": ">=18.0.0"
